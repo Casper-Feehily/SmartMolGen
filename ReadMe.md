@@ -35,7 +35,7 @@
    pip install itertools
    
 ## 使用方法
-  - 运行 main.py，然后输入原子数量：
+  - 运行 main。py，然后输入原子数量：
      ```bash
      python main.py
      ```
