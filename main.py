@@ -1,420 +1,356 @@
 from rdkit import Chem
 from rdkit.Chem import AllChem
-from itertools import combinations
+from itertools import combinations, product
 
 # ==============================================================================
-# 辅助函数：价键检查与不饱和度计算
+# 辅助函数
 # ==============================================================================
 def can_add_bond(mol, atom_idx, bond_order):
-    """检查指定原子是否能添加指定阶数的键（碳最大4价，氧最大2价）"""
+    """检查原子是否可以添加指定键级的键"""
     atom = mol.GetAtomWithIdx(atom_idx)
     current_valence = sum(bond.GetBondTypeAsDouble() for bond in atom.GetBonds())
     max_valence = 4 if atom.GetSymbol() == "C" else 2 if atom.GetSymbol() == "O" else 0
     return (current_valence + bond_order) <= max_valence
 
-def calculate_unsaturation(carbon, hydrogen, oxygen):
-    """计算不饱和度 (DoU)：(2C + 2 - H - O) / 2"""
-    unsat = (2 * carbon + 2 - hydrogen - oxygen) / 2
-    if unsat < 0:
-        raise ValueError("不饱和度为负，分子式不合理。")
-    return unsat
+def calculate_unsaturation(carbon, hydrogen):
+    """计算不饱和度 (DoU): (2C + 2 - H) / 2"""
+    unsat = (2 * carbon + 2 - hydrogen) / 2
+    if unsat < 0 or unsat != int(unsat):
+        raise ValueError("无效的分子式（不饱和度为负或非整数）")
+    return int(unsat)
+
+def SkeletonDoU(skeleton):
+    """计算骨架的不饱和度"""
+    mol = Chem.MolFromSmiles(skeleton)
+    mol_h = Chem.AddHs(mol)
+    h_count = sum(1 for atom in mol_h.GetAtoms() if atom.GetSymbol() == "H")
+    c_count = sum(1 for atom in mol.GetAtoms() if atom.GetSymbol() == "C")
+    unsat = (2 * c_count + 2 - h_count) / 2
+    return int(unsat)
 
 # ==============================================================================
-# 碳骨架生成（饱和）
+# 碳骨架生成
 # ==============================================================================
 def generate_carbon_skeletons(carbon_count):
-    """生成饱和碳骨架（CnH(2n+2)），包括无环和环状"""
+    """生成饱和碳骨架（无环和环状）"""
     hardcoded = {
         1: {"C"},
         2: {"CC"},
-        3: {"CCC"},
-        4: {"CCCC", "CC(C)C"},
-        5: {"CCCCC", "CC(C)CC", "CC(C)(C)C"},
-        6: {"CCCCCC", "CC(C)CCC", "CCC(C)CC", "CC(C)(C)CC", "CC(C)C(C)C"}
+        3: {"CCC", "C(C)C"},
+        4: {"CCCC", "CC(C)C", "C(C)(C)C"},
+        5: {"CCCCC", "CC(C)CC", "C(C)CCC", "CC(C)(C)C", "C(C)(C)CC"},
+        6: {"CCCCCC", "CC(C)CCC", "CCC(C)CC", "CC(C)(C)CC", "CC(C)C(C)C", "C(C)(C)CCC", "c1ccccc1"}  # 包括苯环
     }
+    cyclic = {
+        3: {"C1CC1"},  # 环丙烷
+        4: {"C1CCC1"},  # 环丁烷
+        5: {"C1CCCC1"},  # 环戊烷
+        6: {"C1CCCCC1"},  # 环己烷
+    }
+    result = set()
     if carbon_count in hardcoded:
-        return hardcoded[carbon_count]
-    else:
-        acyclic = generate_acyclic_skeletons(carbon_count)
-        cyclic = generate_cyclic_skeletons(carbon_count)
-        return acyclic.union(cyclic)
-
-def generate_acyclic_skeletons(carbon_count, max_depth=10):
-    """递归生成无环饱和烷烃骨架"""
-    if carbon_count <= 0:
-        return set()
-    results = set()
-    seen = set()
-    start = Chem.MolFromSmiles("C")
-    seen.add(Chem.MolToSmiles(start, canonical=True))
-    _grow_acyclic(start, 1, carbon_count, results, seen, max_depth)
-    return results
-
-def _grow_acyclic(mol, current_count, target_count, results, seen, max_depth):
-    if current_count == target_count or current_count > max_depth:
-        try:
-            Chem.SanitizeMol(mol)
-            results.add(Chem.MolToSmiles(mol, canonical=True))
-        except Exception:
-            pass
-        return
-    for atom in mol.GetAtoms():
-        if atom.GetSymbol() == "C" and atom.GetDegree() < 4:
-            new_mol = Chem.RWMol(mol)
-            new_atom_idx = new_mol.AddAtom(Chem.Atom(6))
-            new_mol.AddBond(atom.GetIdx(), new_atom_idx, Chem.BondType.SINGLE)
-            try:
-                Chem.SanitizeMol(new_mol)
-                smi = Chem.MolToSmiles(new_mol, canonical=True)
-                if smi not in seen:
-                    seen.add(smi)
-                    _grow_acyclic(new_mol, current_count + 1, target_count, results, seen, max_depth)
-            except Exception:
-                continue
-
-def generate_cyclic_skeletons(carbon_count):
-    """生成简单环状骨架，包括芳香环"""
-    results = set()
-    if carbon_count >= 3:
-        results.add("C1" + "C" * (carbon_count - 1) + "1")  # 单环
-    if carbon_count == 4:
-        results.add("C1CCC1")  # 环丁烷
-    if carbon_count == 5:
-        results.add("C1CCCC1")  # 环戊烷
-    if carbon_count == 6:
-        results.add("c1ccccc1")  # 苯
-    if carbon_count == 10:
-        results.add("c1ccc2ccccc2c1")  # 萘
-    if carbon_count == 9:
-        results.add("C1CCC2(C1)CCCC2")  # 螺[4.4]壬烷
-    return results
+        result.update(hardcoded[carbon_count])
+    if carbon_count in cyclic:
+        result.update(cyclic[carbon_count])
+    return result
 
 # ==============================================================================
-# 不饱和骨架生成（烯烃、炔烃、芳香族）
+# 不饱和变体生成
 # ==============================================================================
-def generate_unsaturated_variants_extended(skeleton, target_unsat, carbon_count, oxygen_atoms):
-    """从骨架生成不饱和变体（双键、三键、环）"""
-    results = set()
-    try:
-        sat_mol = Chem.MolFromSmiles(skeleton)
-        if sat_mol.GetNumConformers() == 0:
-            AllChem.EmbedMolecule(sat_mol)
-        Chem.SanitizeMol(sat_mol)
-    except Exception:
+def generate_unsaturated_variants(skeleton, target_unsat):
+    """生成不饱和变体（双键、叁键、环）"""
+    results = set([skeleton]) if target_unsat == SkeletonDoU(skeleton) else set()
+    mol = Chem.MolFromSmiles(skeleton)
+    if not mol:
         return results
-    target_H = 2 * carbon_count + 2 - 2 * target_unsat - oxygen_atoms
 
-    # 候选单键（用于双键或三键）
-    candidate_bonds = [bond.GetIdx() for bond in sat_mol.GetBonds()
-                       if bond.GetBondType() == Chem.BondType.SINGLE and
-                       bond.GetBeginAtom().GetSymbol() == "C" and
-                       bond.GetEndAtom().GetSymbol() == "C"][:10]
+    bonds = [b for b in mol.GetBonds() if b.GetBondType() == Chem.BondType.SINGLE and
+             b.GetBeginAtom().GetSymbol() == "C" and b.GetEndAtom().GetSymbol() == "C"]
+    dmat = Chem.GetDistanceMatrix(mol)
+    ring_pairs = [(i, j) for i, j in combinations(range(mol.GetNumAtoms()), 2)
+                  if mol.GetAtomWithIdx(i).GetSymbol() == "C" and
+                  mol.GetAtomWithIdx(j).GetSymbol() == "C" and
+                  mol.GetBondBetweenAtoms(i, j) is None and dmat[i][j] >= 3]
 
-    # 候选环闭合对（拓扑距离 >= 3）
-    candidate_ring = []
-    dmat = Chem.GetDistanceMatrix(sat_mol)
-    for i, j in combinations(range(sat_mol.GetNumAtoms()), 2):
-        a_i, a_j = sat_mol.GetAtomWithIdx(i), sat_mol.GetAtomWithIdx(j)
-        if a_i.GetSymbol() == "C" and a_j.GetSymbol() == "C" and \
-           sat_mol.GetBondBetweenAtoms(i, j) is None and dmat[i][j] >= 3:
-            candidate_ring.append((i, j))
-    candidate_ring = candidate_ring[:10]
+    base_unsat = SkeletonDoU(skeleton)
+    delta_unsat = target_unsat - base_unsat
+    if delta_unsat < 0:
+        return results
 
-    # 枚举环闭合、双键、三键组合
-    for r in range(min(len(candidate_ring) + 1, int(target_unsat) + 1)):
-        unsat_needed = target_unsat - r
-        ring_combos = list(combinations(candidate_ring, r)) if r > 0 else [()]
-        for ring in ring_combos:
-            bonds = candidate_bonds
-            n = len(bonds)
-            for subset_mask in range(1 << n):
-                chosen = [bonds[i] for i in range(n) if (subset_mask >> i) & 1]
-                for assign_mask in range(1 << len(chosen)):
-                    d_count = sum(1 for j in range(len(chosen)) if not (assign_mask >> j) & 1)
-                    t_count = sum(1 for j in range(len(chosen)) if (assign_mask >> j) & 1)
-                    if d_count + 2 * t_count != unsat_needed:
-                        continue
-                    D = [chosen[j] for j in range(len(chosen)) if not (assign_mask >> j) & 1]
-                    T = [chosen[j] for j in range(len(chosen)) if (assign_mask >> j) & 1]
-                    mod_mol = apply_unsat_modifications(sat_mol, D, T, ring)
-                    try:
-                        Chem.SanitizeMol(mod_mol)
-                        molH = Chem.AddHs(mod_mol)
-                        h_count = sum(1 for atom in molH.GetAtoms() if atom.GetSymbol() == "H")
-                        if h_count == target_H:
-                            results.add(Chem.MolToSmiles(mod_mol, canonical=True))
-                    except Exception:
-                        continue
+    def apply_modifications(base_mol, doubles, triples, rings):
+        rw = Chem.RWMol(base_mol)
+        for b_idx in doubles:
+            bond = rw.GetBondWithIdx(b_idx)
+            i, j = bond.GetBeginAtomIdx(), bond.GetEndAtomIdx()
+            if can_add_bond(rw, i, 1) and can_add_bond(rw, j, 1):
+                rw.RemoveBond(i, j)
+                rw.AddBond(i, j, Chem.BondType.DOUBLE)
+        for b_idx in triples:
+            bond = rw.GetBondWithIdx(b_idx)
+            i, j = bond.GetBeginAtomIdx(), bond.GetEndAtomIdx()
+            if can_add_bond(rw, i, 2) and can_add_bond(rw, j, 2):
+                rw.RemoveBond(i, j)
+                rw.AddBond(i, j, Chem.BondType.TRIPLE)
+        for i, j in rings:
+            if rw.GetBondBetweenAtoms(i, j) is None and can_add_bond(rw, i, 1) and can_add_bond(rw, j, 1):
+                rw.AddBond(i, j, Chem.BondType.SINGLE)
+        try:
+            Chem.SanitizeMol(rw)
+            return Chem.MolToSmiles(rw, canonical=True)
+        except:
+            return None
+
+    for r in range(min(len(ring_pairs) + 1, delta_unsat + 1)):
+        remaining_unsat = delta_unsat - r
+        for ring_combo in combinations(ring_pairs, r) if r > 0 else [()]:
+            for d in range(remaining_unsat + 1):
+                t = remaining_unsat - d
+                if d + 2 * t == remaining_unsat:
+                    for d_bonds in combinations(bonds, d):
+                        for t_bonds in combinations([b for b in bonds if b not in d_bonds], t):
+                            smi = apply_modifications(mol, [b.GetIdx() for b in d_bonds],
+                                                      [b.GetIdx() for b in t_bonds], ring_combo)
+                            if smi:
+                                results.add(smi)
     return results
-
-def apply_unsat_modifications(mol, double_indices, triple_indices, ring_pairs):
-    """应用不饱和修改（双键、三键、环闭合）"""
-    mod_mol = Chem.RWMol(mol)
-    for bond_idx in double_indices:
-        bond = mod_mol.GetBondWithIdx(bond_idx)
-        i, j = bond.GetBeginAtomIdx(), bond.GetEndAtomIdx()
-        if not (can_add_bond(mod_mol, i, 1) and can_add_bond(mod_mol, j, 1)):
-            continue
-        mod_mol.RemoveBond(i, j)
-        mod_mol.AddBond(i, j, Chem.BondType.DOUBLE)
-    for bond_idx in triple_indices:
-        bond = mod_mol.GetBondWithIdx(bond_idx)
-        i, j = bond.GetBeginAtomIdx(), bond.GetEndAtomIdx()
-        if not (can_add_bond(mod_mol, i, 2) and can_add_bond(mod_mol, j, 2)):
-            continue
-        mod_mol.RemoveBond(i, j)
-        mod_mol.AddBond(i, j, Chem.BondType.TRIPLE)
-    for i, j in ring_pairs:
-        if mod_mol.GetBondBetweenAtoms(i, j) is None and can_add_bond(mod_mol, i, 1) and can_add_bond(mod_mol, j, 1):
-            mod_mol.AddBond(i, j, Chem.BondType.SINGLE)
-    return mod_mol.GetMol()
 
 # ==============================================================================
 # 官能团生成
 # ==============================================================================
-def add_hydroxyl_groups(skeleton, count=1):
-    """在骨架上添加羟基 (-OH)"""
+def add_hydroxyl_groups(skeleton, count):
+    """添加羟基 (-OH)，区分醇和酚"""
     results = set()
     mol = Chem.MolFromSmiles(skeleton)
     if not mol:
         return results
-    indices = [atom.GetIdx() for atom in mol.GetAtoms() if atom.GetSymbol() in ("C", "c")]
-    for positions in combinations(indices, count):
-        mod_mol = Chem.RWMol(mol)
+    carbons = [(atom.GetIdx(), atom.GetIsAromatic()) for atom in mol.GetAtoms() if atom.GetSymbol() == "C"]
+    for positions in combinations([idx for idx, _ in carbons], count):
+        rw = Chem.RWMol(mol)
         valid = True
         for pos in positions:
-            if not can_add_bond(mod_mol, pos, 1):
+            if not can_add_bond(rw, pos, 1):
                 valid = False
                 break
-            o_idx = mod_mol.AddAtom(Chem.Atom(8))
-            mod_mol.AddBond(pos, o_idx, Chem.BondType.SINGLE)
+            o_idx = rw.AddAtom(Chem.Atom(8))
+            rw.AddBond(pos, o_idx, Chem.BondType.SINGLE)
         if valid:
             try:
-                Chem.SanitizeMol(mod_mol)
-                results.add(Chem.MolToSmiles(mod_mol))
-            except Exception:
+                Chem.SanitizeMol(rw)
+                results.add(Chem.MolToSmiles(rw, canonical=True))
+            except:
                 continue
     return results
 
 def generate_aldehydes(skeleton):
-    """生成醛类（-CHO）"""
+    """生成醛 (-CHO)，在骨架末端添加"""
     results = set()
     mol = Chem.MolFromSmiles(skeleton)
     if not mol:
         return results
-    indices = [atom.GetIdx() for atom in mol.GetAtoms() if atom.GetSymbol() == "C" and atom.GetDegree() < 4]
-    for idx in indices:
-        rw = Chem.RWMol(mol)
-        if can_add_bond(rw, idx, 2):
+    for atom in mol.GetAtoms():
+        if atom.GetSymbol() == "C" and can_add_bond(mol, atom.GetIdx(), 2):
+            rw = Chem.RWMol(mol)
             o_idx = rw.AddAtom(Chem.Atom(8))
-            rw.AddBond(idx, o_idx, Chem.BondType.DOUBLE)
+            rw.AddBond(atom.GetIdx(), o_idx, Chem.BondType.DOUBLE)
             try:
                 Chem.SanitizeMol(rw)
-                results.add(Chem.MolToSmiles(rw))
-            except Exception:
+                results.add(Chem.MolToSmiles(rw, canonical=True))
+            except:
                 continue
     return results
 
 def generate_ketones(skeleton):
-    """生成酮类（>C=O）"""
+    """生成酮 (>C=O)，在骨架内部添加"""
     results = set()
     mol = Chem.MolFromSmiles(skeleton)
     if not mol:
         return results
-    indices = [atom.GetIdx() for atom in mol.GetAtoms() if atom.GetSymbol() == "C" and atom.GetDegree() >= 2]
-    for idx in indices:
-        rw = Chem.RWMol(mol)
-        if can_add_bond(rw, idx, 2):
+    for atom in mol.GetAtoms():
+        if atom.GetSymbol() == "C" and atom.GetDegree() >= 1 and can_add_bond(mol, atom.GetIdx(), 2):
+            rw = Chem.RWMol(mol)
             o_idx = rw.AddAtom(Chem.Atom(8))
-            rw.AddBond(idx, o_idx, Chem.BondType.DOUBLE)
+            rw.AddBond(atom.GetIdx(), o_idx, Chem.BondType.DOUBLE)
             try:
                 Chem.SanitizeMol(rw)
-                results.add(Chem.MolToSmiles(rw))
-            except Exception:
+                results.add(Chem.MolToSmiles(rw, canonical=True))
+            except:
                 continue
     return results
 
-def generate_carboxylic_acids(skeleton):
-    """生成羧酸（-COOH）"""
+def generate_carboxylic_acids(carbon_count):
+    """生成羧酸 (-COOH)，使用 C-1 的骨架"""
     results = set()
-    mol = Chem.MolFromSmiles(skeleton)
-    if not mol:
+    if carbon_count < 1:
         return results
-    indices = [atom.GetIdx() for atom in mol.GetAtoms() if atom.GetSymbol() in ("C", "c")]
-    for idx in indices:
-        rw = Chem.RWMol(mol)
-        if can_add_bond(rw, idx, 1):
-            new_c = rw.AddAtom(Chem.Atom(6))
-            rw.AddBond(idx, new_c, Chem.BondType.SINGLE)
-            if can_add_bond(rw, new_c, 2) and can_add_bond(rw, new_c, 1):
-                dO = rw.AddAtom(Chem.Atom(8))
-                rw.AddBond(new_c, dO, Chem.BondType.DOUBLE)
-                sO = rw.AddAtom(Chem.Atom(8))
-                rw.AddBond(new_c, sO, Chem.BondType.SINGLE)
-                try:
-                    Chem.SanitizeMol(rw)
-                    results.add(Chem.MolToSmiles(rw))
-                except Exception:
-                    continue
+    base_skeletons = generate_carbon_skeletons(carbon_count - 1) if carbon_count > 1 else {""}
+    for skeleton in base_skeletons:
+        mol = Chem.MolFromSmiles(skeleton) if skeleton else Chem.RWMol()
+        if not skeleton:
+            c_start = mol.AddAtom(Chem.Atom(6))
+        else:
+            c_start = 0
+        for atom_idx in range(mol.GetNumAtoms()) if skeleton else [c_start]:
+            if mol.GetNumAtoms() == 0 or (mol.GetAtomWithIdx(atom_idx).GetSymbol() == "C" and can_add_bond(mol, atom_idx, 1)):
+                rw = Chem.RWMol(mol)
+                c_idx = rw.AddAtom(Chem.Atom(6))
+                if skeleton:
+                    rw.AddBond(atom_idx, c_idx, Chem.BondType.SINGLE)
+                if can_add_bond(rw, c_idx, 3):
+                    o1_idx = rw.AddAtom(Chem.Atom(8))
+                    rw.AddBond(c_idx, o1_idx, Chem.BondType.DOUBLE)
+                    o2_idx = rw.AddAtom(Chem.Atom(8))
+                    rw.AddBond(c_idx, o2_idx, Chem.BondType.SINGLE)
+                    try:
+                        Chem.SanitizeMol(rw)
+                        results.add(Chem.MolToSmiles(rw, canonical=True))
+                    except:
+                        continue
     return results
 
 def generate_esters(carbon_count):
-    """生成酯类（R-COO-R'），R' 至少含一个碳原子"""
+    """生成酯 (R-COO-R')，调整碳分配"""
     results = set()
-    if carbon_count < 3:
+    if carbon_count < 2:  # 至少需要2个碳（甲酸甲酯）
         return results
-    for i in range(1, carbon_count):
-        r1_carbon = i
-        r2_carbon = carbon_count - i - 1
-        if r2_carbon <= 0:
+    for r1_c in range(0, carbon_count):  # r1_c=0 表示甲酸部分
+        r2_c = carbon_count - r1_c - 1
+        if r2_c < 1:
             continue
-        r1_skeletons = generate_carbon_skeletons(r1_carbon)
-        r2_skeletons = generate_carbon_skeletons(r2_carbon)
-        for r1, r2 in [(r1, r2) for r1 in r1_skeletons for r2 in r2_skeletons]:
-            ester_smiles = f"{r1}C(=O)O{r2}"
+        r1_skeletons = generate_carbon_skeletons(r1_c) if r1_c > 0 else {""}
+        r2_skeletons = generate_carbon_skeletons(r2_c)
+        for r1, r2 in product(r1_skeletons, r2_skeletons):
+            smi = f"{r1}C(=O)O{r2}" if r1 else f"C(=O)O{r2}"
             try:
-                mol = Chem.MolFromSmiles(ester_smiles)
+                mol = Chem.MolFromSmiles(smi)
                 Chem.SanitizeMol(mol)
                 results.add(Chem.MolToSmiles(mol, canonical=True))
-            except Exception:
+            except:
                 continue
     return results
 
 def generate_ethers(carbon_count):
-    """生成醚类（R-O-R'）"""
+    """生成醚 (R-O-R')"""
     results = set()
     if carbon_count < 2:
         return results
-    for i in range(1, carbon_count):
-        r1_carbon = i
-        r2_carbon = carbon_count - i
-        if r2_carbon <= 0:
-            continue
-        r1_skeletons = generate_carbon_skeletons(r1_carbon)
-        r2_skeletons = generate_carbon_skeletons(r2_carbon)
-        for r1, r2 in [(r1, r2) for r1 in r1_skeletons for r2 in r2_skeletons]:
-            ether_smiles = f"{r1}O{r2}"
+    for r1_c in range(1, carbon_count):
+        r2_c = carbon_count - r1_c
+        r1_skeletons = generate_carbon_skeletons(r1_c)
+        r2_skeletons = generate_carbon_skeletons(r2_c)
+        for r1, r2 in product(r1_skeletons, r2_skeletons):
+            smi = f"{r1}O{r2}"
             try:
-                mol = Chem.MolFromSmiles(ether_smiles)
+                mol = Chem.MolFromSmiles(smi)
                 Chem.SanitizeMol(mol)
                 results.add(Chem.MolToSmiles(mol, canonical=True))
-            except Exception:
+            except:
                 continue
     return results
 
-def generate_phenols(aromatic_skeleton, oxygen_count):
-    """生成酚类（芳香环上的-OH）"""
+def generate_phenols(skeleton, oxygen_count):
+    """生成酚（芳香环上的 -OH）"""
     results = set()
-    mol = Chem.MolFromSmiles(aromatic_skeleton)
+    mol = Chem.MolFromSmiles(skeleton)
     if not mol or not any(atom.GetIsAromatic() for atom in mol.GetAtoms()):
         return results
-    aromatic_carbons = [atom.GetIdx() for atom in mol.GetAtoms() if atom.GetIsAromatic() and atom.GetSymbol() == "C"]
+    aromatic_carbons = [atom.GetIdx() for atom in mol.GetAtoms() if atom.GetIsAromatic()]
     for positions in combinations(aromatic_carbons, oxygen_count):
-        mod_mol = Chem.RWMol(mol)
+        rw = Chem.RWMol(mol)
         valid = True
         for pos in positions:
-            if not can_add_bond(mod_mol, pos, 1):
+            if not can_add_bond(rw, pos, 1):
                 valid = False
                 break
-            o_idx = mod_mol.AddAtom(Chem.Atom(8))
-            mod_mol.AddBond(pos, o_idx, Chem.BondType.SINGLE)
+            o_idx = rw.AddAtom(Chem.Atom(8))
+            rw.AddBond(pos, o_idx, Chem.BondType.SINGLE)
         if valid:
             try:
-                Chem.SanitizeMol(mod_mol)
-                results.add(Chem.MolToSmiles(mod_mol))
-            except Exception:
+                Chem.SanitizeMol(rw)
+                results.add(Chem.MolToSmiles(rw, canonical=True))
+            except:
                 continue
     return results
 
 # ==============================================================================
-# 验证、过滤与分类
+# 验证和分类
 # ==============================================================================
-def validate_smiles(smiles_set):
-    """验证 SMILES 有效性，返回 (SMILES, 氢数, 类型)"""
-    valid = set()
+def validate_and_classify(smiles_set, target_hydrogen, target_oxygen):
+    """验证 SMILES 并分类化合物，确保氢和氧原子数正确"""
+    results = set()
+    patterns = [
+        ("羧酸", Chem.MolFromSmarts("[CX3](=O)[OX2H1]")),
+        ("酯类", Chem.MolFromSmarts("[CX3](=O)[OX2][#6]")),
+        ("酚类", Chem.MolFromSmarts("c-[OX2H]")),
+        ("醇类", Chem.MolFromSmarts("[CX4]-[OX2H]")),
+        ("醛类", Chem.MolFromSmarts("[CX3H1](=O)")),
+        ("酮类", Chem.MolFromSmarts("[CX3](=O)([#6])[#6]")),
+        ("醚类", Chem.MolFromSmarts("[#6]-[OX2]-[#6]")),
+        ("芳香族化合物", Chem.MolFromSmarts("[c]")),
+        ("炔烃", Chem.MolFromSmarts("[C]#[C]")),
+        ("烯烃", Chem.MolFromSmarts("[C]=[C]")),
+        ("烷烃", Chem.MolFromSmarts("[C!H0]"))
+    ]
+
     for smi in smiles_set:
         mol = Chem.MolFromSmiles(smi)
         if mol:
             try:
                 Chem.SanitizeMol(mol)
-                molH = Chem.AddHs(mol)
-                h_count = sum(1 for atom in molH.GetAtoms() if atom.GetSymbol() == "H")
-                mol_type = classify_compound(smi)
-                valid.add((Chem.MolToSmiles(mol, canonical=True), h_count, mol_type))
-            except Exception:
+                mol_h = Chem.AddHs(mol)
+                h_count = sum(1 for atom in mol_h.GetAtoms() if atom.GetSymbol() == "H")
+                o_count = sum(1 for atom in mol.GetAtoms() if atom.GetSymbol() == "O")
+                if h_count == target_hydrogen and o_count == target_oxygen:
+                    typ = "未知"
+                    for name, pat in patterns:
+                        if mol.HasSubstructMatch(pat):
+                            typ = name
+                            break
+                    results.add((Chem.MolToSmiles(mol, canonical=True), typ))
+            except:
                 continue
-    return valid
-
-def filter_by_hydrogen_count(valid_tuples, target_H):
-    """按氢原子数过滤"""
-    return [(smi, typ) for smi, h, typ in valid_tuples if h == target_H]
-
-def classify_compound(smiles):
-    """使用 SMARTS 模式分类化合物类型"""
-    mol = Chem.MolFromSmiles(smiles)
-    if not mol:
-        return "未知"
-    aromatic = any(atom.GetIsAromatic() for atom in mol.GetAtoms())
-    pat_alcohol = Chem.MolFromSmarts("[CX4]-[OX2H]")
-    pat_phenol = Chem.MolFromSmarts("c-[OX2H]")
-    pat_aldehyde = Chem.MolFromSmarts("[CX3H1](=O)-[#6]")
-    pat_ketone = Chem.MolFromSmarts("[CX3](=O)([#6])[#6]")
-    pat_ester = Chem.MolFromSmarts("[CX3](=O)[OX2][#6]")
-    pat_ether = Chem.MolFromSmarts("[#6]-[OX2]-[#6]")
-    pat_carboxyl = Chem.MolFromSmarts("[CX3](=O)[OX2H1]")
-    if mol.HasSubstructMatch(pat_ester):
-        return "酯类"
-    elif mol.HasSubstructMatch(pat_carboxyl):
-        return "羧酸"
-    elif aromatic and mol.HasSubstructMatch(pat_phenol):
-        return "酚类"
-    elif mol.HasSubstructMatch(pat_alcohol):
-        return "醇类"
-    elif mol.HasSubstructMatch(pat_aldehyde):
-        return "醛类"
-    elif mol.HasSubstructMatch(pat_ketone):
-        return "酮类"
-    elif mol.HasSubstructMatch(pat_ether) and not aromatic:
-        return "醚类"
-    elif aromatic:
-        return "芳香族化合物"
-    elif "C#C" in smiles:
-        return "炔烃"
-    elif "C=C" in smiles or "c=c" in smiles:
-        return "烯烃"
-    else:
-        return "烷烃"
+    return results
 
 # ==============================================================================
-# 根据氧原子数和不饱和度生成化合物
+# 化合物生成
 # ==============================================================================
-def generate_compounds(base_skeletons, oxygen_count, carbon_count, target_unsat):
+def generate_compounds(carbon_count, oxygen_count, target_unsat, hydrogen_count):
     """生成所有可能的化合物"""
     candidates = set()
-    aromatic_skeletons = {s for s in base_skeletons if Chem.MolFromSmiles(s) and
-                          any(atom.GetIsAromatic() for atom in Chem.MolFromSmiles(s).GetAtoms())}
+    base_skeletons = generate_carbon_skeletons(carbon_count)
+    unsaturated_skeletons = set()
+    for skeleton in base_skeletons:
+        unsaturated_skeletons.update(generate_unsaturated_variants(skeleton, target_unsat))
 
+    # 无氧：仅生成烃类
     if oxygen_count == 0:
-        candidates.update(base_skeletons)
+        candidates.update(unsaturated_skeletons)
     else:
-        for skeleton in base_skeletons:
-            if oxygen_count >= 1:
-                candidates.update(add_hydroxyl_groups(skeleton, min(oxygen_count, 1)))
+        aromatic_skeletons = {s for s in unsaturated_skeletons if
+                              any(atom.GetIsAromatic() for atom in Chem.MolFromSmiles(s).GetAtoms())}
+
+        # 氧 = 1
+        if oxygen_count >= 1:
+            for skeleton in unsaturated_skeletons:
+                candidates.update(add_hydroxyl_groups(skeleton, 1))
                 candidates.update(generate_aldehydes(skeleton))
                 candidates.update(generate_ketones(skeleton))
-            if oxygen_count >= 2:
-                candidates.update(generate_carboxylic_acids(skeleton))
-                candidates.update(add_hydroxyl_groups(skeleton, min(oxygen_count, 2)))
-        if oxygen_count == 1:
             candidates.update(generate_ethers(carbon_count))
             for aromatic in aromatic_skeletons:
                 candidates.update(generate_phenols(aromatic, 1))
-        if oxygen_count == 2:
+
+        # 氧 = 2
+        if oxygen_count >= 2:
+            candidates.update(generate_carboxylic_acids(carbon_count))
             candidates.update(generate_esters(carbon_count))
+            for skeleton in unsaturated_skeletons:
+                candidates.update(add_hydroxyl_groups(skeleton, 2))
+
+        # 氧 > 2
         if oxygen_count > 2:
-            for skeleton in base_skeletons:
+            for skeleton in unsaturated_skeletons:
                 candidates.update(add_hydroxyl_groups(skeleton, oxygen_count))
-    return candidates
+
+    return validate_and_classify(candidates, hydrogen_count, oxygen_count)
 
 # ==============================================================================
 # 主函数
@@ -429,28 +365,14 @@ def main():
         return
 
     try:
-        target_unsat = calculate_unsaturation(carbon_atoms, hydrogen_atoms, oxygen_atoms)
+        target_unsat = calculate_unsaturation(carbon_atoms, hydrogen_atoms)
     except ValueError as e:
         print(e)
         return
 
-    sat_skeletons = generate_carbon_skeletons(carbon_atoms)
-    base_skeletons = sat_skeletons if target_unsat == 0 else set()
-    if target_unsat > 0:
-        for s in sat_skeletons:
-            base_skeletons.update(generate_unsaturated_variants_extended(s, target_unsat, carbon_atoms, oxygen_atoms))
-        if carbon_atoms == 6:
-            base_skeletons.add("c1ccccc1")  # 确保苯环被包含
-
-    # 使用 carbon_atoms 而不是 carbon_count
-    compounds = generate_compounds(base_skeletons, oxygen_atoms, carbon_atoms, target_unsat)
-    valid = validate_smiles(compounds)
-    filtered = filter_by_hydrogen_count(valid, hydrogen_atoms)
-
-    unique = {smi: typ for smi, typ in filtered}
-
-    print(f"\n生成的可能SMILES结构 ({len(unique)} 种):")
-    for smi, typ in sorted(unique.items()):
+    compounds = generate_compounds(carbon_atoms, oxygen_atoms, target_unsat, hydrogen_atoms)
+    print(f"\n生成的可能SMILES结构 ({len(compounds)} 种):")
+    for smi, typ in sorted(compounds):
         print(f"{smi} - {typ}")
 
 if __name__ == "__main__":
