@@ -4,7 +4,6 @@ from itertools import combinations
 from collections import defaultdict
 import re
 
-#/*
 #*                        _oo0oo_
 #*                       o8888888o
 #*                       88" . "88
